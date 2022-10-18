@@ -1,0 +1,239 @@
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(usdata)
+library(stringr)
+library(janitor)
+
+# ==============================================================================
+# Merging mass shooting df's ----
+# ==============================================================================
+
+## Clean shoot13.20 ----
+
+# delete incident id, address, operations 
+shoot13.20 = shoot13.20[-c(1,5,8)]
+
+# rename cols to match shooting df
+shoot13.20 = shoot13.20 %>% 
+  rename(date = Incident.Date, fatalities = X..Killed, injured = X..Injured) 
+
+# change colnames to all lowercase
+names(shoot13.20) <- tolower(names(shoot13.20))
+
+# change date format
+shoot13.20 = shoot13.20 %>%
+  mutate(date = lubridate::mdy(date),
+         date = strftime(date, "%m/%d/%Y"))
+
+# Add total victims col
+shoot13.20$total_victims = shoot13.20$fatalities + shoot13.20$injured
+
+## Clean shooting ----
+# update date format for shooting
+shooting = shooting %>%
+  mutate(date = lubridate::mdy(date),
+         date = strftime(date, "%m/%d/%Y"))
+
+# separate location into city and state
+shooting = shooting %>% 
+  separate(location, into = c('city.or.county', 'state'), sep = ', ', remove = T) %>% 
+  relocate(city.or.county, .before = date) %>% 
+  relocate(state, .before = date) %>% 
+  relocate(type, .after = total_victims) %>% 
+  rename(location = location.1) 
+shooting = shooting[,-c(1,5,9:25)]
+
+#remove quotes from tk value
+#shooting$injured <- gsub('"','',as.character(shooting$injured))
+shooting[,4][shooting[,4] == '(TK - "fewer than 10"'] <- NA
+shooting[,5][shooting[,5] == 'TK'] <- NA
+
+# change columns to numeric so they can be merged with shoot13.20
+shooting$injured = as.numeric(shooting$injured)
+shooting$total_victims = as.numeric(shooting$total_victims)
+
+# rbind the two dataframes
+# To leave the original data.frames intact, first loop through the names that differ, return a named vector of NAs that are concatenated into a list with the data.frame using c. Then, data.frame converts the result into an appropriate data.frame for the rbind.
+# combo = rbind(
+#   data.frame(c(shooting, sapply(setdiff(names(shoot13.20), names(shooting)), function(x) NA))),
+#   data.frame(c(shoot13.20, sapply(setdiff(names(shooting), names(shoot13.20)), function(x) NA)))
+# )
+# dupl = combo[duplicated(combo[c(2:4)]),]
+
+
+
+## Merge shooting and shoot13.20 ----
+
+combined = bind_rows(shooting, shoot13.20)
+# check for duplicates using city, state, date
+dup = combined[duplicated(combined[c(1:3)]), ]
+# remove duplicates
+combined = combined[!duplicated(combined[c(1:3)]), ]
+
+
+## clean mass ----
+# keep only columns present in 'combined'
+mass = mass[-c(1,5,8:16)]
+
+# rename cols to match 'combined' df
+mass = mass %>% 
+  rename(city.or.county = city, 
+         fatalities = num_victims_killed, 
+         injured = num_victims_injured) 
+
+# change date format
+mass = mass %>%
+  mutate(date = lubridate::ymd(date),
+         date = strftime(date, "%m/%d/%Y"))
+
+# change state abb to full name
+mass$state = abbr2state(mass$state)
+
+# create total victims column
+mass$total_victims = mass$fatalities + mass$injured
+
+## merge combined and mass ----
+combined = bind_rows(combined, mass)
+
+# check for duplicates
+dup2 = combined[duplicated(combined[c(1:3)]), ]
+# remove duplicates
+combined = combined[!duplicated(combined[c(1:3)]), ]
+
+# check number of na's
+cbind(lapply(lapply(combined, is.na), sum))
+#injured                          1   
+#total_victims                    1 
+
+# remove na's from total vic col
+combined = combined[complete.cases(combined[ , 6]),]
+
+# keep only rows with >3 total victims
+combined = combined[combined$total_victims >3, ]
+
+# create year column
+combined$year = str_sub(combined$date,-4,-1)
+
+# subset to keep years b/w 1991 and 2020
+combined = combined[combined$year >= 1991 & combined$year <= 2020, ]
+
+
+combined = combined %>% relocate(year, .after = date)
+
+# sort by state and yr
+combined = combined[order(combined[,2], combined[,4] ),]
+
+cbind(lapply(lapply(combined, is.na), sum))
+
+
+# remove city column
+combined = combined[-1]
+
+## sum the total number of victims and shootings by state and year ----
+#q = aggregate(total_victims ~ state + year,data=combined,FUN=sum)
+combined = combined |>
+  group_by(state, year) |> 
+  summarise(total_victims = sum(total_victims),
+            total_shootings = n())
+
+
+#===============================================================================
+# Clean population datasets ----
+#===============================================================================
+
+## 1969-2009 ----
+# delete unnecessary columns and rows
+pop1991_2009 = pop1969_2009[-c(1:3,5,57:68), -c(1,3:24)]
+# reset row numbers
+pop1991_2009 = pop1991_2009 %>% as.data.frame(row.names = 1:nrow(.))
+# set first row as col names and change 'Area Name' to 'state'
+pop1991_2009 = pop1991_2009 %>% row_to_names(row_number = 1) %>% rename(state = `Area Name`)
+# change year to column value and value to new column
+pop1991_2009 <- pop1991_2009  %>% 
+  pivot_longer(2:20, names_to = "year", values_to = "population")
+# CHECK FOR BLANK AND MISSING VALUES
+pop1991_20092 = pop1991_2009
+pop1991_20092[pop1991_20092[,1:3]=="" | pop1991_20092[,1:3]==" "] = NA
+cbind(lapply(lapply(pop1991_20092, is.na), sum)) 
+
+
+## pop2010_2019 ----
+pop2010_2019 = pop2010_2019[-c(1:5,7:11, 63:111),-c(1,3,14)]
+# reset row numbers
+pop2010_2019 = pop2010_2019 %>% as.data.frame(row.names = 1:nrow(.))
+# set first row as col names and change Area to state
+pop2010_2019 = pop2010_2019 %>% row_to_names(row_number = 1) %>% rename(state = Area)
+# change year to column value and value of yr col to new column
+pop2010_2019 <- pop2010_2019  %>% 
+  pivot_longer(2:11, names_to = "year", values_to = "population")
+# CHECK FOR BLANK AND MISSING VALUES
+pop2010_20192 = pop2010_2019
+pop2010_20192[pop2010_20192[,1:3]=="" | pop2010_20192[,1:3]==" "] = NA
+cbind(lapply(lapply(pop2010_20192, is.na), sum)) 
+
+
+## 1850-2020 ----
+# delete unnecessary columns and rows
+pop2020 = pop1850_2020[-c(1:2,4), -c(1,3:19)]
+# reset row numbers
+pop2020 = pop2020 %>% as.data.frame(row.names = 1:nrow(.))
+# set first row as col names and change Areaname to state
+pop2020 = pop2020 %>% row_to_names(row_number = 1) %>% rename(state = Areaname)
+# change year to column value and value to new column called population
+pop2020 <- pop2020  %>% 
+  pivot_longer(c(`2020`), names_to = "year", values_to = "population")
+# check for missing values
+cbind(lapply(lapply(pop2020, is.na), sum))
+
+## Merge population df's together ----
+population = rbind(pop1991_2009,pop2010_2019,pop2020)
+
+# CHECK FOR BLANK AND MISSING VALUES
+sum(population=="")
+population2 = population
+population2[population2[,1:3]=="" | population2[,1:3]==" "] = NA
+cbind(lapply(lapply(population2, is.na), sum)) 
+
+population$population = as.numeric(gsub(",", "", population$population))
+
+# CHECK AGAIN FOR BLANK AND MISSING VALUES
+sum(population=="")
+population2 = population
+population2[population2[,1:3]=="" | population2[,1:3]==" "] = NA
+cbind(lapply(lapply(population2, is.na), sum))
+
+# create new col called pop per 100k
+population$pop_per100k = (100000/population$population)*100000
+population$pop_per100k = round(population$pop_per100k, digits = 0)
+
+# sort rows by state and year
+# population2 = population[order( population[,1],  population[,2] ),]
+population = population %>% arrange(state, year)
+
+# CHECK AGAIN FOR BLANK AND MISSING VALUES
+population2 = population
+sum(population2=="")
+population2[population2[,1:4]=="" | population2[,1:4]==" "] = NA
+cbind(lapply(lapply(population2, is.na), sum))
+
+
+
+#===============================================================================
+# Merge all df's together ----
+#===============================================================================
+
+all = merge(combined, population, by.x=c("state", "year"), by.y=c("state", "year"))
+
+all = merge(all, laws, by.x=c("state", "year"), by.y=c("state", "year"))
+
+# check for missing values
+sum(all=="")
+
+cbind(lapply(lapply(all,is.na), sum))
+
+
+
+
+
+
